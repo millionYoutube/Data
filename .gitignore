@@ -1,0 +1,3 @@
+config.py
+*.ipynb
+.ipynb_checkpoints
