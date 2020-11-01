@@ -1,3 +1,5 @@
 config.py
 *.ipynb
 .ipynb_checkpoints
+chromedriver
+__pycache__

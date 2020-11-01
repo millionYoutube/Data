@@ -1,24 +1,25 @@
+import config
 import requests
 import json
-import config
 import util
 import time
 import datetime
 import sys
 import warnings
+import logging
+import concurrent.futures
 from threading import Thread
-from multiprocessing import Process,Queue
+from multiprocessing import Process,Queue,Pool
 
 warnings.filterwarnings('ignore')
 
-category_ids = [1,10,15,17,20,24]
 API_KEY = config.API_KEY
-
-now = datetime.datetime.now().now()
-ranking_time = '{}-{:02}'.format(now.strftime('%y%m%d'),now.hour)
+ranking_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def multiProcessing(cat_id,q):
+def run_each_categories(cat_id):
+    global q,cursor,conn
+    ranking=1
     url = 'https://www.googleapis.com/youtube/v3/videos'
     params={
         'key':API_KEY,
@@ -30,58 +31,52 @@ def multiProcessing(cat_id,q):
     }
     response = requests.get(url,params)
     response = json.loads(response.text)
+    data = []
     for ranking,resp in enumerate(response['items']):
-        q.put(
+        data.append(
             (
-                resp['id'],
-                resp['snippet']['publishedAt'],
-                resp['snippet']['title'].replace('\"','\''),
-                resp['snippet']['channelId'],
-                cat_id,
-                ranking+1
+            resp['id'],
+            resp['snippet']['publishedAt'][:10],
+            resp['snippet']['title'].replace('\"','\''),
+            resp['snippet']['channelId'],
+            resp['snippet']['channelTitle'],
+            cat_id,
+            ranking,
+            ranking_time
             )
         )
-
-def consume(q):
-    global conn
-    count = 0
-    while True:
-        data = q.get()
-        th = Thread(target=insert2RDS, args=(data,))
-        th.start()
-        th.join()
-        count +=1
-        if count>=300:
-            conn.commit()
-            conn.close()
-            break
-
-def insert2RDS(data):
-    global cursor
+        ranking+=1
     sql = '''
         INSERT INTO popular_videos
-        (id, published_at, title, channel_id, category_id, ranking, ranking_time)
-        VALUES ("{}", "{}", "{}", "{}", {}, {}, "{}");
-        '''.format(*data,ranking_time)
+        (id, published_at, title, channel_id, channel_title,
+        category_id,ranking,ranking_time)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        '''
+
+    cursor.executemany(sql,data)
+
+def getCategories():
+    global cursor, category_ids
+    sql = 'select id from categories'
     cursor.execute(sql)
+    category_ids = list(map(lambda x: x[0],cursor.fetchall()))
+    return category_ids
 
 def run():
     stime = time.time()
-    global conn,cursor
-    conn, cursor = util.connect2RDS()
-
-    q = Queue()
-    process_list = [Process(target=multiProcessing, args=(id,q)) for id in category_ids]
-    consumer = Process(target=consume, args=(q,))
-    for process in process_list:
-        process.start()
-    consumer.start()
-    q.close()
-    q.join_thread()
-    for process in process_list:
-        process.join()
-    consumer.join()
-    print(stime-time.time())
+    global conn,cursor, category_ids
+    try:
+        conn, cursor = util.connect2RDS()
+        category_ids = getCategories()
+        with Pool(processes=8) as pool:
+            pool.map(run_each_categories,category_ids)
+        conn.commit()
+    except:
+        logging.error("FAILED TO UPDATE POPULAR_VIDEOS")
+        conn.rollback()
+    finally:
+        conn.close()
+    print(time.time()-stime)
 
 if __name__=='__main__':
     run()
